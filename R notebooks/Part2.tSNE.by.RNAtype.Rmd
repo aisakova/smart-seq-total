@@ -1,0 +1,257 @@
+---
+title: "Part2. t-SNE by RNA type"
+author: "Alina Isakova"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  
+---
+```{r}
+library(reticulate)
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(cowplot)
+library(openxlsx)
+library(ggplot2)
+library(edgeR)
+library(scales)
+library(reshape2)
+#set colors
+mycols<-c("#F39B7FB2","#E64B35B2", "#DC0000B2","#4DBBD5B2","steelblue2", "#3C5488B2","mediumturquoise","mediumaquamarine","forestgreen","#8491B4B2" )
+```
+####t-SNE by biotype
+# This part shows how to plot t-SNE plots shown in Fig1f
+```{r}
+counts<-readRDS("count.Seurat.obj.rds")
+##Load the gene-to-biotype matrix
+gtf<-read.delim(file = "GRCh38.id.name.biotype.tsv", sep='\t',  header=T)
+gtf<-gtf[match(rownames(counts),gtf$gene_name), ] 
+gtf<-data.frame(lapply(gtf, as.character),stringsAsFactors=FALSE)
+```
+
+```{r}
+rna<-as.matrix(read.delim(file = "counts.human.tsv",sep="\t", header= TRUE))
+
+###Prep metadata
+plate<-gsub("_.*","",  colnames(rna))
+plate.md<-cbind(colnames(rna),plate)
+plate.md<-data.frame(plate.md)
+rownames(plate.md)<-unique(plate.md$V1)
+
+celltype<-ifelse(grepl("HEK",plate), "HEK293T",
+              ifelse(grepl("MCF7",plate), "MCF7", "Fibroblasts"))
+celltype.md<-cbind(colnames(rna),celltype)
+celltype.md<-data.frame(celltype.md)
+rownames(celltype.md)<-celltype.md$V1
+```
+
+#t-SNE by biotype
+# miRNA: we only use those annotated by miRBase (start with "MIR")
+```{r,fig.width=5, fig.asp=.8}
+counts.mirna<-rna[grepl("MIR",rownames(rna)),]
+
+counts.mirna <- Matrix(counts.mirna, sparse = T)
+counts.mirna <- CreateSeuratObject(counts.mirna, project = "Human_sncRNA", min.cells = 3, min.features = 6)
+
+counts.mirna <- AddMetaData(counts.mirna, 
+                      metadata = plate.md)
+counts.mirna <- AddMetaData(counts.mirna, 
+                      metadata = celltype.md)
+
+counts.mirna <- NormalizeData(object = counts.mirna, normalization.method = "LogNormalize", scale.factor = 1e4, verbose = FALSE)
+all.genes <- rownames(x = counts.mirna)
+counts.mirna <- ScaleData(object = counts.mirna, features = all.genes) #, vars.to.regress = "percent.mt") 
+counts.mirna <- FindVariableFeatures(object = counts.mirna)
+counts.mirna <- RunPCA(object = counts.mirna, npcs = 30, verbose=FALSE) #, features = all.genes[!grepl("HIST",all.genes)] )
+
+counts.mirna <- RunTSNE(object = counts.mirna,dims = 1:4)
+DimPlot(object = counts.mirna, reduction = "tsne", group.by = "celltype", pt.size = 1) + ggtitle("t-SNE by plate, miRNA") + theme(plot.title = element_text(hjust = 0.5))+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+
+# t-SNE by protein coding genes 
+```{r,fig.width=5, fig.asp=.8}
+pc.genes<-gtf$gene_name[gtf$gene_biotype=="protein_coding"]
+pc.genes<-pc.genes[!grepl("^HIST",pc.genes)]
+counts.pc<-rna[rownames(rna)%in%pc.genes,]
+counts.pc <- Matrix(counts.pc, sparse = T)
+counts.pc <- CreateSeuratObject(counts.pc, project = "Human_sncRNA", min.cells = 3, min.features = 10)
+
+counts.pc <- AddMetaData(counts.pc, 
+                      metadata = plate.md)
+counts.pc <- AddMetaData(counts.pc, 
+                      metadata = celltype.md)
+
+counts.pc <- NormalizeData(object = counts.pc, normalization.method = "LogNormalize", scale.factor = 1e4, verbose = FALSE)
+all.genes <- rownames(x = counts.pc)
+counts.pc <- ScaleData(object = counts.pc, features = all.genes) #, vars.to.regress = "percent.mt") 
+counts.pc <- FindVariableFeatures(object = counts.pc)
+counts.pc <- RunPCA(object = counts.pc, npcs = 20, verbose=FALSE) #, features = all.genes[!grepl("HIST",all.genes)] )
+
+counts.pc <- RunTSNE(object = counts.pc,dims = 1:15)
+DimPlot(object = counts.pc, reduction = "tsne", group.by = "celltype", pt.size = 1) + ggtitle("t-SNE by plate") + theme(plot.title = element_text(hjust = 0.5))+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+
+# t-SNE by protein coding+histones
+```{r,fig.width=5, fig.asp=.8}
+pc.hist<-gtf$gene_name[gtf$gene_biotype=="protein_coding"]
+pc.hist<-pc.hist[pc.hist%in%rownames(counts)]
+counts.pc.hist<-rna[rownames(rna)%in%pc.hist,]
+
+counts.pc.hist<-as.matrix(counts.pc.hist)
+
+counts.pc.hist <- Matrix(counts.pc.hist, sparse = T)
+counts.pc.hist <- CreateSeuratObject(counts.pc.hist, project = "Human_sncRNA", min.cells = 3, min.features = 10)
+
+counts.pc.hist <- AddMetaData(counts.pc.hist, 
+                      metadata = plate.md)
+counts.pc.hist <- AddMetaData(counts.pc.hist, 
+                      metadata = celltype.md)
+
+counts.pc.hist <- NormalizeData(object = counts.pc.hist, normalization.method = "LogNormalize", scale.factor = 1e4, verbose = FALSE)
+all.genes <- rownames(x = counts.pc.hist)
+counts.pc.hist <- ScaleData(object = counts.pc.hist, features = all.genes) 
+counts.pc.hist <- FindVariableFeatures(object = counts.pc.hist)
+counts.pc.hist <- RunPCA(object = counts.pc.hist, npcs = 30, verbose=FALSE) 
+
+counts.pc.hist <- RunTSNE(object = counts.pc.hist,dims = 1:10)
+DimPlot(object = counts.pc.hist, reduction = "tsne", group.by = "celltype", pt.size = 1) + ggtitle("t-SNE by plate, pc+histone") + theme(plot.title = element_text(hjust = 0.5))+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+
+
+# t-SNE by lincRNA
+```{r,fig.width=5, fig.asp=.8}
+linc<-gtf$gene_name[gtf$gene_biotype=="lincRNA"]
+linc<-linc[linc%in%rownames(counts)]
+counts.linc<-rna[rownames(rna)%in%linc,]
+
+counts.linc<-as.matrix(counts.linc)
+
+counts.linc <- Matrix(counts.linc, sparse = T)
+counts.linc <- CreateSeuratObject(counts.linc, project = "Human_sncRNA", min.cells = 3, min.features = 10)
+
+counts.linc <- AddMetaData(counts.linc, 
+                      metadata = plate.md)
+counts.linc <- AddMetaData(counts.linc, 
+                      metadata = celltype.md)
+
+counts.linc <- NormalizeData(object = counts.linc, normalization.method = "LogNormalize", scale.factor = 1e4, verbose = FALSE)
+all.genes <- rownames(x = counts.linc)
+counts.linc <- ScaleData(object = counts.linc, features = all.genes) 
+counts.linc <- FindVariableFeatures(object = counts.linc)
+counts.linc <- RunPCA(object = counts.linc, npcs = 30, verbose=FALSE) 
+
+counts.linc <- RunTSNE(object = counts.linc,dims = 1:10)
+DimPlot(object = counts.linc, reduction = "tsne",  group.by = "celltype",pt.size = 1) + ggtitle("t-SNE by plate") + theme(plot.title = element_text(hjust = 0.5))+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+
+# t-SNE by miscRNA
+```{r,fig.width=5, fig.asp=0.8}
+misc<-gtf$gene_name[gtf$gene_biotype=="misc_RNA"]
+misc<-misc[misc%in%rownames(counts)]
+counts.misc<-rna[rownames(rna)%in%misc,]
+counts.misc<-counts.misc[!grepl("^HIST",rownames(counts.misc)),]
+
+counts.misc<-as.matrix(counts.misc)
+counts.misc <- Matrix(counts.misc, sparse = T)
+counts.misc <- CreateSeuratObject(counts.misc, project = "Human_sncRNA", min.cells = 3, min.features = 10)
+
+counts.misc <- AddMetaData(counts.misc, 
+                      metadata = plate.md)
+counts.misc <- AddMetaData(counts.misc, 
+                      metadata = celltype.md)
+
+counts.misc <- NormalizeData(object = counts.misc, normalization.method = "LogNormalize", scale.factor = 1e4, verbose = FALSE)
+all.genes <- rownames(x = counts.misc)
+counts.misc <- ScaleData(object = counts.misc, features = all.genes) 
+counts.misc <- FindVariableFeatures(object = counts.misc)
+counts.misc <- RunPCA(object = counts.misc, npcs = 30, verbose=FALSE) 
+
+counts.misc <- RunTSNE(object = counts.misc,dims = 1:5)
+DimPlot(object = counts.misc, reduction = "tsne",group.by = "celltype", pt.size = 1) + ggtitle("t-SNE by plate") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+# t-SNE by snoRNA
+```{r,fig.width=5, fig.asp=0.8}
+## SnoRNA annotation is not complete. We use only 'SNOR' genes for the analysis 
+sno<-rownames(counts)[grepl("SNOR",rownames(counts))]
+counts.sno<-rna[rownames(rna)%in%sno,]
+
+counts.sno<-as.matrix(counts.sno)
+counts.sno <- Matrix(counts.sno, sparse = T)
+counts.sno <- CreateSeuratObject(counts.sno, project = "Human_sncRNA", min.cells = 3, min.features = 10)
+
+counts.sno <- AddMetaData(counts.sno, 
+                      metadata = plate.md)
+counts.sno <- AddMetaData(counts.sno, 
+                      metadata = celltype.md)
+
+
+counts.sno <- NormalizeData(object = counts.sno, normalization.method = "LogNormalize", scale.factor = 1e4, verbose = FALSE)
+all.genes <- rownames(x = counts.sno)
+counts.sno <- ScaleData(object = counts.sno, features = all.genes) #, vars.to.regress = "percent.mt") 
+counts.sno <- FindVariableFeatures(object = counts.sno)
+counts.sno <- RunPCA(object = counts.sno, npcs = 30, verbose=FALSE) #, features = all.genes[!grepl("HIST",all.genes)] )
+
+counts.sno <- RunTSNE(object = counts.sno,dims = 1:10)
+DimPlot(object = counts.sno, reduction = "tsne",group.by = "celltype", pt.size = 1) + ggtitle("t-SNE by plate") + theme(plot.title = element_text(hjust = 0.5))+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+
+
+# t-SNE by sncRNA
+```{r,fig.width=5, fig.asp=0.9}
+snc<-gtf$gene_name[grepl("snRNA|misc_RNA|Mt_tRNA|snoRNA|scaRNA",gtf$gene_biotype)]
+snc<-snc[snc%in%rownames(counts)]
+counts.snc<-rna[rownames(rna)%in%snc,]
+
+counts.snc<-as.matrix(counts.snc)
+counts.snc <- Matrix(counts.snc, sparse = T)
+counts.snc <- CreateSeuratObject(counts.snc, project = "Human_sncRNA", min.cells = 3, min.features = 10)
+
+counts.snc <- AddMetaData(counts.snc, 
+                      metadata = plate.md)
+counts.snc <- AddMetaData(counts.snc, 
+                      metadata = celltype.md)
+
+counts.snc <- NormalizeData(object = counts.snc, normalization.method = "LogNormalize", scale.factor = 1e4, verbose = FALSE)
+all.genes <- rownames(x = counts.snc)
+counts.snc <- ScaleData(object = counts.snc, features = all.genes) 
+counts.snc <- FindVariableFeatures(object = counts.snc)
+counts.snc <- RunPCA(object = counts.snc, npcs = 30, verbose=FALSE) 
+
+counts.snc <- RunTSNE(object = counts.snc,dims = 1:20)
+DimPlot(object = counts.snc, reduction = "tsne", group.by = "celltype", pt.size = 1) + ggtitle("t-SNE by plate") + theme(plot.title = element_text(hjust = 0.5))+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+# t-SNE by histone RNA
+```{r,fig.width=5, fig.asp=0.8}
+hist<-gtf$gene_name[grepl("^HIST",gtf$gene_name)]
+hist<-hist[hist%in%rownames(counts)]
+counts.hist<-rna[rownames(rna)%in%hist,]
+
+counts.hist<-as.matrix(counts.hist)
+counts.hist <- Matrix(counts.hist, sparse = T)
+counts.hist <- CreateSeuratObject(counts.hist, project = "Human_histRNA", min.cells = 3, min.features = 5)
+
+counts.hist <- AddMetaData(counts.hist, 
+                      metadata = plate.md)
+counts.hist <- AddMetaData(counts.hist, 
+                      metadata = celltype.md)
+
+counts.hist <- NormalizeData(object = counts.hist, normalization.method = "LogNormalize", scale.factor = 1e4, verbose = FALSE)
+all.genes <- rownames(x = counts.hist)
+counts.hist <- ScaleData(object = counts.hist, features = all.genes)  
+counts.hist <- FindVariableFeatures(object = counts.hist)
+counts.hist <- RunPCA(object = counts.hist, npcs = 30, verbose=FALSE) 
+
+counts.hist <- RunTSNE(object = counts.hist,dims = 1:10)
+DimPlot(object = counts.hist, reduction = "tsne",  group.by = "celltype", pt.size = 1) + ggtitle("t-SNE by plate") + theme(plot.title = element_text(hjust = 0.5))+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+
+```

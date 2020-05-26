@@ -1,0 +1,418 @@
+---
+title: "Part1. Stats + pre-processing"
+author: "Alina Isakova"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  
+---
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("Scripts/")) 
+```
+
+```{r}
+library(reticulate)
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(cowplot)
+library(openxlsx)
+library(ggplot2)
+library(edgeR)
+library(scales)
+library(reshape2)
+#set colors
+mycols<-c("#F39B7FB2","#E64B35B2", "#DC0000B2","#4DBBD5B2","steelblue2", "#3C5488B2","mediumturquoise","mediumaquamarine","forestgreen","#8491B4B2" )
+```
+##Load count matrix
+```{r}
+counts<-read.delim(file = "counts.human.tsv",sep="\t", header= TRUE)
+```
+##Load the gene-to-biotype matrix
+```{r}
+gtf<-read.delim(file = "GRCh38.id.name.biotype.tsv", sep='\t',  header=T)
+gtf<-gtf[match(rownames(counts),gtf$gene_name), ] 
+```
+
+##Plot number of genes (cpm>1) per biotype 
+```{r}
+df<-data.frame(cpm(counts))
+df[df >=1 ] = 1
+df$biotype<-as.character(gtf$gene_biotype)
+df<-aggregate(. ~ biotype, data=df, FUN=sum)
+df1<-melt(df)
+ggplot(data=df1, aes(y = value, x = biotype)) + 
+  geom_boxplot() +
+  scale_y_log10()+
+  xlab("Transcript biotype")+
+  ylab("Number of unique genes")+
+  theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+df1$variable<-gsub("_.*", "", df1$variable) ##remove cell id and only keep the cell type
+  
+df1<-df1[!grepl("pseudogene|TR_|IG_|macro|processed|overlapping|TEC|sense|promoter|Mt_rRNA|sRNA|vaultRNA|ribozyme|rRNA", df1$biotype),]
+
+ggplot(df1, aes(x=df1$biotype, y=df1$value,color=variable))+
+  geom_boxplot()+
+  scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^x))+
+  annotation_logticks(sides = "l")+                
+  theme_linedraw()+
+  scale_color_manual(values=mycols[c(2,8,5)]) +
+  scale_fill_manual(values=mycols[c(2,8,5)])+
+  xlab("Transcript biotype")+
+  ylab("Number of unique genes")+
+  labs(color = "Cell type")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+```
+##Plot number of total cunts per biotype 
+```{r}
+df<-counts
+df$biotype<-as.character(gtf$gene_biotype)
+
+df<-aggregate(. ~ biotype, data=df, FUN=sum)
+
+df1<-melt(df)
+ggplot(data=df1, aes(y = value, x = biotype)) + 
+  geom_boxplot() +
+  scale_y_log10()+
+  xlab("Transcript biotype")+
+  ylab("Number of counts")+
+  theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+#Visualize transcript abundance in each cell for specific RNA types
+```{r}
+df1<-df1[!grepl("pseudogene|TR_|IG_|macro|processed|overlapping|TEC|sense|promoter|Mt_rRNA|sRNA|vaultRNA|ribozyme|rRNA", df1$biotype),]
+df1$biotype<-gsub("Mt_tRNA", "tRNA", df1$biotype) ## count genomic tRNA and mitochondrial tRNA together
+df1$variable<-gsub("_.*", "", df1$variable)
+
+```
+
+```{r}
+df2<-aggregate(.~ biotype+variable, df1, FUN=mean)
+df2<-df2 %>%
+  dplyr::group_by(variable) %>% 
+  dplyr::mutate(percent = value*100/sum(value))
+
+df2 <- df2 %>%
+  dplyr::arrange(desc(biotype)) %>%
+  dplyr::mutate(lab.ypos = cumsum(percent) - 0.5*percent)
+
+my.levels<-c("protein_coding","misc_RNA","lincRNA", "snoRNA","miRNA","scaRNA","snRNA", "tRNA")
+df2$biotype<-factor(df2$biotype, levels=my.levels)
+
+df2 <- df2 %>%
+  dplyr::arrange(desc(biotype)) %>%
+  dplyr::mutate(y = ifelse(percent < 1, percent*5, ifelse(percent < 5, percent*2, percent))) %>%  ###for visualization purposes inflate the slices of a pie with low percentage
+  dplyr::mutate(percenty =y*100/sum(y))%>%
+  dplyr::mutate(lab.ypos = cumsum(percenty) - 0.5*percenty)
+   
+mycols3<-c("#3C5488B2","#4DBBD5B2","#E64B35B2","#F39B7FB2",'mediumorchid1',"#DC0000B2","steelblue2", "aquamarine3","mediumturquoise","forestgreen")
+
+ggplot(df2, aes(x=2, y=percenty, fill=biotype), legend=FALSE)+
+  geom_bar(stat = "identity", color = "white")+
+  theme_void()+
+  scale_fill_manual(values=mycols3)+
+  geom_text(aes(y=lab.ypos,label = paste0(round(percent), "%")), color = "white", size=4)+ ### use actual percentage for the plot, but not the infalted values
+  facet_wrap(~variable)+
+  xlim(0.9, 2.5)+
+  coord_polar("y", start=0)
+
+```
+
+
+
+###Prep count matrix and metadata
+```{r}
+counts<-as.matrix(counts)
+plate<-gsub("_.*","",  colnames(counts))
+plate.md<-cbind(colnames(counts),plate)
+plate.md<-data.frame(plate.md)
+rownames(plate.md)<-unique(plate.md$V1)
+
+celltype<-ifelse(grepl("HEK",plate), "HEK293T",
+              ifelse(grepl("MCF7",plate), "MCF7", "Fibroblasts"))
+celltype.md<-cbind(colnames(counts),celltype)
+celltype.md<-data.frame(celltype.md)
+rownames(celltype.md)<-celltype.md$V1
+```
+
+##Create Seurat object
+```{r}
+counts <- Matrix(counts, sparse = T)
+counts <- CreateSeuratObject(counts, project = "Human_sncRNA", min.cells = 3, min.features = 300)
+
+counts <- PercentageFeatureSet(object = counts, pattern = "^MT-", col.name = "percent.mt")
+counts <- PercentageFeatureSet(object = counts, pattern = "^HIST", col.name = "percent.hist")
+
+counts <- subset(counts, subset = nCount_RNA < 2e+06 & nFeature_RNA > 2000)
+
+#Add metadata
+counts <- AddMetaData(counts, 
+                      metadata = plate.md)
+counts <- AddMetaData(counts, 
+                      metadata = celltype.md)
+
+```
+# Visualize QC metrics as a violin plot
+```{r}
+VlnPlot(object = counts, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.hist"), ncol = 4)
+```
+
+```{r, fig.width=10, fig.asp=0.5}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+plot1 <- FeatureScatter(object = counts, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(object = counts, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2))
+
+plot<-plot2+
+  xlim(c(0,2000000))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+### NORMALIZE data
+```{r}
+counts <- NormalizeData(object = counts, normalization.method = "LogNormalize", scale.factor = 1e6, verbose = FALSE)
+####FIND VARIABLE GENES
+counts<- FindVariableFeatures(object = counts)
+```
+### SCALE
+```{r}
+counts <- ScaleData(object = counts) 
+```
+### COMPUTE PCs
+```{r}
+counts <- RunPCA(object = counts, npcs = 100, verbose=FALSE)
+
+# Examine and visualize PCA results a few different ways
+print(x = counts[["pca"]], dims = 1:5, nfeatures = 5)
+
+##### Visualize genes separating in first two dimensions
+VizDimLoadings(object = counts, dims = 1:2, reduction = "pca")
+DimPlot(object = counts, reduction = "pca")
+```
+
+```{r}
+cc.genes<-read.delim(file = "regev_lab_cell_cycle_genes.txt", sep="\t", header= F, stringsAsFactors = F)
+s.genes<-cc.genes[1:43,]
+g2m.genes<-cc.genes[44:97,]
+```
+
+
+```{r}
+counts <- CellCycleScoring(counts, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+# Visualize the distribution of cell cycle markers across
+RidgePlot(counts, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
+```
+
+
+```{r}
+counts <- JackStraw(object = counts, dim=50, num.replicate = 100)
+counts <- ScoreJackStraw(object = counts, dims = 1:50)
+JackStrawPlot(object = counts, dims = 1:50)
+```
+
+```{r,message=F}
+counts <- FindNeighbors(object = counts, dims = 1:30, force.recalc =TRUE)
+counts <- FindClusters(object = counts, dims = 1:30, resolution = 1)
+```
+
+### RUN t-SNE
+```{r}
+counts <- RunTSNE(object = counts, dims = 1:19)
+```
+
+```{r,fig.width=4, fig.asp=0.9}
+counts <- RunTSNE(object = counts, dims = 1:8)
+
+DimPlot(object = counts, reduction = "tsne", group.by = "Phase",
+            pt.size = 1) + ggtitle("UMAP by cluster") + theme(plot.title = element_text(hjust = 0.5),legend.position = "none") +scale_color_manual(values=c("#999999"  ,"#E69F00", "#56B4E9")) +
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank(), legend.position = "none") 
+```
+
+```{r,fig.width=5, fig.asp=.9}
+DimPlot(object = counts, reduction = "tsne", group.by = "celltype", pt.size = 1) + ggtitle("t-SNE by cell type") + theme(plot.title = element_text(hjust = 0.5))+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank(), legend.position = "none") 
+```
+
+
+```{r,fig.width=4, fig.asp=.9}
+DimPlot(object = counts, reduction = "tsne", group.by = "seurat_clusters",  
+             pt.size = 1) + ggtitle("t-SNE by cluster") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r, fig.width=8, fig.asp=.5, echo=FALSE,message=FALSE, warning=FALSE}
+FeaturePlot(object = counts,
+            reduction = "tsne", 
+            features = c('HIST1H2AG', 'HIST1H3B','HIST2H4B',
+                        'CDK1', 'CCNB1', 'FBXO5'), 
+            ncol = 3,
+            sort.cell=T,
+            slot='data')
+```
+
+# find markers for every cell type
+```{r}
+Idents(counts)<-'celltype'
+counts.markers <- FindAllMarkers(object = counts, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+# Single cell heatmap of feature expression
+```{r,fig.width=6, fig.asp=.8}
+top10 <-counts.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+DoHeatmap(object = counts, features = top10$gene) + NoLegend()
+```
+
+
+# Plot markers for every cluster
+```{r,fig.width=8, fig.asp=3, echo=F}
+VlnPlot(object = counts, features = c(top10$gene,"CD24", "CKB","TOP2A", "MCM6", "THY1"), pt.size=0)
+```
+
+# Plot markers for every gene type
+```{r,fig.width=6, fig.asp=.5, echo=F}
+top500 <-counts.markers %>% group_by(cluster) %>% top_n(n = 500, wt = avg_logFC)
+genes<-top500$gene[grepl("HIST", top500$gene)]
+DotPlot(
+  counts,
+  assay = NULL,
+  features=c(genes, "HIST1H1E", "HIST1H1C"),
+  #cols = c("lightgrey", "blue"),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  cols=c("blue", "red"),
+#  group.by = 'Phase',
+  dot.scale = 6)+ theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Plot markers for miRNA cluster
+```{r,fig.width=6, fig.asp=.5, echo=F}
+genes<-rownames(counts.markers)[grepl("MIR", rownames(counts.markers))]
+DotPlot(
+  counts,
+  assay = NULL,
+  features=c(genes, "MIR17","MIR100", "MIR130A"),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  cols=c("blue", "red"),
+  dot.scale = 6)+ theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+# Plot snoRNA markers
+```{r,fig.width=6, fig.asp=.5, echo=F}
+top1000 <-counts.markers %>% group_by(cluster) %>% top_n(n = 1000, wt = avg_logFC)
+genes<-top1000$gene[grepl("SNOR", top1000$gene)]
+
+DotPlot(
+  counts,
+  assay = NULL,
+  features=c(genes),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  cols=c("blue", "red"),
+  dot.scale = 6)+ theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+# Plot lncRNA markers
+```{r,fig.width=6, fig.asp=.5, echo=F}
+linc<-as.character(gtf$gene_name[gtf$gene_biotype=="lincRNA"])
+linc<-linc[linc%in%top1000$gene]
+linc<-linc[!grepl('^RP|^MIR|^CH|BCYRN1|^AC', linc)]
+genes<-unique(linc)
+DotPlot(
+  counts,
+  assay = NULL,
+  features=c(genes),
+  #cols = c("lightgrey", "blue"),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  cols=c("blue", "red"),
+#  group.by = 'Phase',
+  dot.scale = 6)+ theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+# Plot snRNA markers
+```{r,fig.width=6, fig.asp=.5, echo=F}
+sn<-as.character(gtf$gene_name[gtf$gene_biotype=="snRNA"])
+sn<-sn[sn%in%top1000$gene]
+
+DotPlot(
+  counts,
+  assay = NULL,
+  features=c(sn),
+  #cols = c("lightgrey", "blue"),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  cols=c("blue", "red"),
+#  group.by = 'Phase',
+  dot.scale = 6)+ theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+# Plot scaRNA markers
+```{r,fig.width=6, fig.asp=.5, echo=F}
+genes<-rownames(counts.markers)[grepl("SCARNA", rownames(counts.markers))]
+DotPlot(
+  counts,
+  assay = NULL,
+  features=c(genes),
+  #cols = c("lightgrey", "blue"),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  cols=c("blue", "red"),
+#  group.by = 'Phase',
+  dot.scale = 6)+ theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Plot tRNA markers
+```{r,fig.width=6, fig.asp=.5, echo=F}
+trna<-rownames(counts)[grepl('tRNA', rownames(counts))]
+DotPlot(
+  counts,
+  assay = NULL,
+  features=c(trna),
+  #cols = c("lightgrey", "blue"),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  cols=c("blue", "red"),
+#  group.by = 'Phase',
+  dot.scale = 6)+ theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Plot mitochondrial tRNA markers
+```{r,fig.width=9, fig.asp=.3, echo=F}
+trna<-rownames(counts)[grepl('MT-', rownames(counts))]
+DotPlot(
+  counts,
+  assay = NULL,
+  features=c(trna),
+  #cols = c("lightgrey", "blue"),
+  col.min = -2.5,
+  col.max = 2.5,
+  dot.min = 0,
+  cols=c("blue", "red"),
+#  group.by = 'Phase',
+  dot.scale = 6)+ theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank(),panel.background = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r,fig.width=9, fig.asp=1.5, echo=F}
+genes<-c("COL1A2", "CKB","KRT8","TFF1","HEY1", 
+         "MEG3","LINC00707","LINC00052","JPX","PVT1",
+         "MIR222", "MIR877","MIR16-2", "MIR27A", "MIRLET7D",
+         "SNORD114-11", "SNORD71", "SNORD71","SNORD3A","SNORA59A",
+         "SCARNA22", "SCARNA23","SCARNA20","RNY1", "RNU6-1",
+         "VTRNA1-1","MT-TD")
+VlnPlot(object = counts, group.by ='plate',features = genes, ncol=5, pt.size=0)
+```
+#Save the Seurat object for further analysis in part 2
+```{r}
+saveRDS(counts,file="count.Seurat.obj.rds")
+```
+

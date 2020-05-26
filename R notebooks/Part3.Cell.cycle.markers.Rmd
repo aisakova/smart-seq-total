@@ -1,0 +1,414 @@
+---
+title: "Part3. Cell cycle"
+author: "Alina Isakova"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  
+---
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("Scripts/")) 
+```
+```{r, echo=T}
+library(reticulate)
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(cowplot)
+library(openxlsx)
+library(ggplot2)
+library(edgeR)
+library(scales)
+library(reshape2)
+#set colors
+mycols<-c("#F39B7FB2","#E64B35B2", "#DC0000B2","#4DBBD5B2","steelblue2", "#3C5488B2","mediumturquoise","mediumaquamarine","forestgreen","#8491B4B2" )
+```
+###This part shows how to plot cell cycle genes shown in the Figure 2 of the manuscript and in the supplement.
+```{r,echo=T}
+counts<-readRDS("count.Seurat.obj.rds")
+```
+
+```{r,echo=T}
+### Get biotypes
+gtf<-read.delim(file = "GRCh38.id.name.biotype.tsv", sep='\t',  header=T)
+gtf<-gtf[match(rownames(counts),gtf$gene_name), ] 
+gtf<-data.frame(lapply(gtf, as.character),stringsAsFactors=FALSE)
+```
+
+#### Cell cycle scoring is performed on each cell type individually:
+#### 1. Subset seurat object into three objects, one per cell type
+#### 2. Assign a cycle phase to each cell
+```{r,fig.width=5, fig.asp=.8, echo=T}
+Idents(counts)<-"celltype"
+counts.fibro<-subset(counts, idents = 'Fibroblasts')
+counts.hek<-subset(counts, idents = 'HEK293T')
+counts.mcf<-subset(counts, idents = 'MCF7')
+```
+
+```{r,message=FALSE, warning=FALSE}
+cc.genes<-read.delim(file = "/Users/alinaisakova/Documents/Stanford/sc-smallRNA/cell_cycle_vignette_files/regev_lab_cell_cycle_genes.txt", sep="\t", header= F, stringsAsFactors = F)
+s.genes<-cc.genes[1:43,]
+g2m.genes<-cc.genes[44:97,]
+```
+
+```{r,message=FALSE, warning=FALSE}
+counts.fibro <- CellCycleScoring(counts.fibro, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+counts.mcf <-CellCycleScoring(counts.mcf, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+counts.hek <-CellCycleScoring(counts.hek, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+```
+##### Fibroblasts
+```{r fig.width=4,echo=T,message=FALSE, warning=FALSE}
+cc.cell.stat<-counts.fibro@meta.data
+m2 <- cc.cell.stat %>% dplyr::count(Phase)
+m2$Phase<-factor(m2$Phase, levels=c("G1", "S", "G2M"))
+ggplot(m2, aes(x=Phase, y=n, fill=Phase))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values=c("#999999"  , "#56B4E9","#E69F00")) +
+  geom_text(aes(label=n), vjust=0)+
+  theme_minimal()
+```
+#####MCF7
+```{r fig.width=4,echo=T,message=FALSE, warning=FALSE}
+cc.cell.stat<-counts.mcf@meta.data
+m2 <- cc.cell.stat %>% dplyr::count(Phase)
+m2$Phase<-factor(m2$Phase, levels=c("G1", "S", "G2M"))
+ggplot(m2, aes(x=Phase, y=n, fill=Phase))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values=c("#999999"  , "#56B4E9","#E69F00")) +
+  geom_text(aes(label=n), vjust=0)+
+  theme_minimal()
+```
+####HEK293T
+```{r fig.width=4,echo=T,message=FALSE, warning=FALSE}
+cc.cell.stat<-counts.hek@meta.data
+m2 <- cc.cell.stat %>% dplyr::count(Phase)
+m2$Phase<-factor(m2$Phase, levels=c("G1", "S", "G2M"))
+ggplot(m2, aes(x=Phase, y=n, fill=Phase))+
+  geom_bar(stat = "identity")+
+    scale_fill_manual(values=c("#999999"  , "#56B4E9","#E69F00")) +
+  geom_text(aes(label=n), vjust=0)+
+  theme_minimal()
+```
+ 
+#### This part shows how to plot Figure 2A and Suppl figures 5-7 on the example of Fibroblasts:
+
+```{r, fig.width=8, fig.asp=1, echo=T,message=FALSE, warning=FALSE}
+RidgePlot(counts.fibro, group.by = "Phase",
+          features = c('CDK1',"PCNA", "TOP2A", "MCM6", "MKI67", "CCNB1", "CCND1", "HIST1H3C", "HIST1H1E"), 
+          ncol = 2, combine=T)
+```
+
+### Cell cycle-specific transcripts within each cell types. Only shown for Fibroblasts:
+
+```{r fig.width=16, fig.asp=2, echo=T,message=FALSE, warning=FALSE}
+library(tidyverse)
+c.type<-'Fibroblasts'
+Idents(counts.fibro)<-"Phase"
+fibro.cc<-AverageExpression(object = counts.fibro,assays = 'RNA')
+fibro.cc.matrix<-do.call(cbind, fibro.cc)
+
+fibro.cc.ge <- reshape2::melt(as.matrix(fibro.cc.matrix))
+fibro.cc.ge$Var2<-gsub('RNA.',"",fibro.cc.ge$Var2)
+colnames(fibro.cc.ge)<-c("gene", "Phase", "Expression")
+```
+
+#Genes shown in Fig2a
+```{r fig.width=8, fig.asp=1, echo=T,message=FALSE, warning=FALSE}
+library(tidyverse)
+features<-c('MIR199A1','MIR16-2','MIR222','MIR27A','LINC01184','LINC00467', 'TUG1', 'SNORD3A', 'SNORD17', 'SNORD83A','SNORD113-7' )
+
+for (gene in features){
+  fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%gene,] 
+  
+ggplot(fibro.cc.gene, aes(x = factor(Phase, levels=c('G1', 'S', 'G2M')), y = Expression)) +
+    geom_col(aes(fill = factor(Phase, levels=c('G1', 'S', 'G2M')))) +
+    labs(x = "", y = "Expression") +
+    theme_bw()+
+    labs(fill='Cell cycle phase') +
+    scale_fill_manual(values=c("#999999",  "#56B4E9","#E69F00"))+
+    coord_polar()+
+    ggtitle(gene)
+ggsave(paste0(gene,".Fibro.cc.markers.pdf"),  width=4, height=4, device="pdf", useDingbats=FALSE)
+}
+```
+
+
+```{r fig.width=16, fig.asp=1, echo=T,message=FALSE, warning=FALSE}
+biotype.names<-rownames(counts)[grepl("^HIST", rownames(counts))]
+fibro.cc.ge.sig<-fibro.cc.ge[fibro.cc.ge$Expression>5,]
+features<-droplevels(fibro.cc.ge.sig$gene[fibro.cc.ge.sig$gene%in%biotype.names])
+features<-droplevels(features[!grepl("HIST1H4", features)])
+
+fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%features,] 
+
+fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%features,] 
+ggplot(fibro.cc.gene, aes(x = factor(Phase, levels=c('G1', 'S', 'G2M')), y = Expression)) +
+    geom_col(aes(fill = factor(Phase, levels=c('G1', 'S', 'G2M')))) +
+    labs(x = "", y = "Expression") +
+    theme_bw()+
+    labs(fill='Cell cycle phase') +
+    coord_polar()+
+    scale_fill_manual(values=c("#999999",  "#56B4E9","#E69F00"))+
+    ggtitle('Histone RNA')+
+    facet_wrap(~gene) 
+```
+
+
+```{r fig.width=16, fig.asp=1, echo=FALSE,message=FALSE, warning=FALSE}
+library(tidyverse)
+linc<-gtf$gene_name[gtf$gene_biotype=="lincRNA"]
+biotype.names<-linc
+fibro.cc.ge.sig<-fibro.cc.ge[fibro.cc.ge$Expression>5,]
+features<-droplevels(fibro.cc.ge.sig$gene[fibro.cc.ge.sig$gene%in%biotype.names])
+#Polar coordinate plot does not support free x and y. To see the expression of low expressed genes, exclude highly expressed genes:
+features<-droplevels(features[!grepl("^CH|^RP|^CTD-|^MIR|^CTC|^AC|BCYRN1|MALAT1|LINC00324|NEAT1|SNHG8|^XXbac|LINC00657|SPATA13|XIST|SNHG|LINC00052|U4|-AS1$", features)])
+
+fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%features,] 
+ggplot(fibro.cc.gene, aes(x = factor(Phase, levels=c('G1', 'S', 'G2M')), y = Expression)) +
+    geom_col(aes(fill = factor(Phase, levels=c('G1', 'S', 'G2M')))) +
+    labs(x = "", y = "Expression") +
+    theme_bw()+
+    labs(fill='Cell cycle phase') +
+    scale_fill_manual(values=c("#999999",  "#56B4E9","#E69F00"))+
+    coord_polar()+
+    ggtitle('lincRNA')+
+    facet_wrap(~gene, ncol=7) 
+```
+
+```{r fig.width=8, fig.asp=.4, echo=FALSE,message=FALSE, warning=FALSE}
+library(tidyverse)
+biotype.names<-gtf$gene_name[gtf$gene_biotype == 'misc_RNA']
+fibro.cc.ge.sig<-fibro.cc.ge[fibro.cc.ge$Expression>1,]
+features<-droplevels(fibro.cc.ge.sig$gene[fibro.cc.ge.sig$gene%in%biotype.names])
+#Polar coordinate plot does not support free x and y. To see the expression of low expressed genes, exclude highly expressed genes:
+features<-droplevels(features[!grepl("^RN7S|^RNY4P|TP73|RNY3P1|VTRNA3-1|MALAT1", features)])
+
+fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%features,] 
+ggplot(fibro.cc.gene, aes(x = factor(Phase, levels=c('G1', 'S', 'G2M')), y = Expression)) +
+    geom_col(aes(fill = factor(Phase, levels=c('G1', 'S', 'G2M')))) +
+    labs(x = "", y = "Expression") +
+    theme_bw()+
+    labs(fill='Cell cycle phase') +
+  scale_fill_manual(values=c("#999999",  "#56B4E9","#E69F00"))+
+    coord_polar()+
+    ggtitle('misc_RNA')+
+    facet_wrap(~gene, ncol=7)
+```
+
+```{r fig.width=16, fig.asp=.6, echo=FALSE,message=FALSE, warning=FALSE}
+library(tidyverse)
+biotype.names<-gtf$gene_name[gtf$gene_biotype == 'antisense']
+fibro.cc.ge.sig<-fibro.cc.ge[fibro.cc.ge$Expression>10,]
+features<-droplevels(fibro.cc.ge.sig$gene[fibro.cc.ge.sig$gene%in%biotype.names])
+features<-droplevels(features[!grepl("DACT3-AS1|RP11-|KCNQ|DSCAM-AS1|TUG1|ZFAS1|^LINC", features)])
+
+fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%features,] 
+ggplot(fibro.cc.gene, aes(x = factor(Phase, levels=c('G1', 'S', 'G2M')), y = Expression)) +
+    geom_col(aes(fill = factor(Phase, levels=c('G1', 'S', 'G2M')))) +
+    labs(x = "", y = "Expression") +
+    theme_bw()+
+    labs(fill='Cell cycle phase') +
+  scale_fill_manual(values=c("#999999",  "#56B4E9","#E69F00"))+
+    coord_polar()+
+    ggtitle('antisense')+
+    facet_wrap(~gene, ncol=7) 
+```
+
+```{r fig.width=8, fig.asp=1, echo=FALSE,message=FALSE, warning=FALSE}
+library(tidyverse)
+biotype.names<-gtf$gene_name[gtf$gene_biotype == 'miRNA']
+
+fibro.cc.ge.sig<-fibro.cc.ge[fibro.cc.ge$Expression>1,]
+features<-droplevels(fibro.cc.ge.sig$gene[grepl("^MIR", fibro.cc.ge.sig$gene)])
+features<-droplevels(features[!grepl("^MIR6724|^MIR4435-2HG|^MIR4449|HG|MIR6087|MIR3609|MIR16-2|MIR3929|MIR222", features)])
+
+fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%features,] 
+ggplot(fibro.cc.gene, aes(x = factor(Phase, levels=c('G1', 'S', 'G2M')), y = Expression)) +
+    geom_col(aes(fill = factor(Phase, levels=c('G1', 'S', 'G2M')))) +
+    labs(x = "", y = "Expression") +
+    theme_bw()+
+    labs(fill='Cell cycle phase') +
+  scale_fill_manual(values=c("#999999",  "#56B4E9","#E69F00"))+
+    coord_polar()+
+    ggtitle('miRNA')+
+    facet_wrap(~gene,ncol = 7) 
+```
+```{r fig.width=8, fig.asp=.4, echo=FALSE,message=FALSE, warning=FALSE}
+library(tidyverse)
+biotype.names<-gtf$gene_name[gtf$gene_biotype == 'snRNA']
+fibro.cc.ge.sig<-fibro.cc.ge[fibro.cc.ge$Expression>5,]
+
+features<-droplevels(fibro.cc.ge.sig$gene[fibro.cc.ge.sig$gene%in%biotype.names])
+features<-droplevels(features[!grepl("^RNU6|^RNU1|^RNVU|RNU4-|U1", features)])
+
+fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%features,] 
+ggplot(fibro.cc.gene, aes(x = factor(Phase, levels=c('G1', 'S', 'G2M')), y = Expression)) +
+    geom_col(aes(fill = factor(Phase, levels=c('G1', 'S', 'G2M')))) +
+    labs(x = "", y = "Expression") +
+    theme_bw()+
+    labs(fill='Cell cycle phase') +
+    scale_fill_manual(values=c("#999999",  "#56B4E9","#E69F00"))+
+    coord_polar()+
+    ggtitle('snRNA')+
+    facet_wrap(~gene, ncol = 7) 
+```
+
+```{r fig.width=8, fig.asp=1, echo=FALSE,message=FALSE, warning=FALSE}
+library(tidyverse)
+biotype.names<-gtf$gene_name[gtf$gene_biotype == 'snoRNA']
+fibro.cc.ge.sig<-fibro.cc.ge[fibro.cc.ge$Expression>5,]
+
+features<-droplevels(fibro.cc.ge.sig$gene[fibro.cc.ge.sig$gene%in%biotype.names])
+features<-droplevels(features[!grepl("SNORD3A|SNORD3C|SNORD3B|SNORD17|SNORA80E|SNORD83A", features)])
+
+
+fibro.cc.gene<-fibro.cc.ge[fibro.cc.ge$gene%in%features,] 
+ggplot(fibro.cc.gene, aes(x = factor(Phase, levels=c('G1', 'S', 'G2M')), y = Expression)) +
+    geom_col(aes(fill = factor(Phase, levels=c('G1', 'S', 'G2M')))) +
+    labs(x = "", y = "Expression") +
+    theme_bw()+
+    labs(fill='Cell cycle phase') +
+  scale_fill_manual(values=c("#999999",  "#56B4E9","#E69F00"))+
+
+    coord_polar()+
+    ggtitle('snRNA')+
+    facet_wrap(~gene,ncol = 7) 
+```
+
+#### To produce Fig2c
+```{r}
+library(hrbrthemes)
+library(unikn)
+library(viridis)
+library(RColorBrewer)
+#hist<-rownames(counts)[grepl('HIST',rownames(counts))]
+
+##Just plot a few instead of the whole list:
+hist<-c("HIST1H1C","HIST1H1D","HIST1H2AG","HIST1H2AH",
+        "HIST1H2AI","HIST1H2AJ","HIST1H2AL","HIST1H3A",
+        "HIST1H3B","HIST1H3C","HIST1H3D" ,"HIST1H3F",
+        "HIST1H4A","HIST1H4B", "HIST1H4C","HIST1H4D",
+        "HIST2H2AB","HIST2H3A","HIST2H3C","HIST2H3D",
+        "HIST2H4A", "HIST2H4B","HIST4H4")
+
+selected.genes<-c('SMARCD3', 'MAX', 'ULK4',  # G1
+                  'MCM5', 'DTL','PCNA', #S 'UNG',
+                  'CDK1', 'CCNB1','TOP2A', hist) # G1M 'MKI67','CENPA')
+
+
+cc<-AverageExpression(object = counts,add.ident = 'Phase')
+cc.matrix<-do.call(cbind, cc)
+cc.matrix<-cc.matrix[rownames(cc.matrix)%in%selected.genes,]
+
+cc.ge <- reshape2::melt(as.matrix(cc.matrix))
+cc.ge$Var2<-gsub('RNA.',"",cc.ge$Var2)
+
+colnames(cc.ge)<-c("gene", "Phase", "Expression")
+cc.ge$celltype<-gsub("_.*",'',cc.ge$Phase)
+cc.ge$Phase<-gsub(".*_",'',cc.ge$Phase)
+
+cc.ge <- cc.ge %>% group_by(gene,celltype) %>% mutate(Expression_scaled = scale(Expression))
+
+pal3<-colorRampPalette(brewer.pal(11,"RdBu"))(255)
+ggplot(cc.ge, aes(gene, Phase, fill= Expression_scaled)) + 
+  geom_tile(color='grey',size=.2) + 
+  scale_y_discrete(limits = c("G2M","S", "G1"))+
+  facet_wrap(~celltype, scales="free_y", ncol = 1)+
+  scale_fill_gradientn(colours=rev(pal3) ) +
+  scale_x_discrete(limits=selected.genes)+
+  theme_ipsum() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size=9))
+```
+
+
+#### To plot Fig2d and other histones
+
+
+```{r}
+Idents(counts)<-"celltype"
+counts.markers <- FindAllMarkers(object = counts, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+
+```{r, fig.width=15, fig.asp=1, echo=FALSE,message=FALSE, warning=FALSE}
+top500 <-counts.markers %>% group_by(cluster) %>% top_n(n = 500, wt = avg_logFC)
+genes<-top500$gene[grepl("^HIST", top500$gene)]
+VlnPlot(object = counts, group.by='celltype',features = genes, pt.size = 0)
+```
+```{r,fig.width=3, fig.asp=6, echo=FALSE,message=FALSE, warning=FALSE}
+genes<-c('HIST1H4L', 'HIST1H2BB', 'HIST3H2BA', 'HIST2H2A', 'HIST3H2BB','HIST3H2A','HIST1H3C', 'HIST1H1B','HIST1H4F')
+VlnPlot(object = counts, group.by='celltype',features = genes, pt.size = 0, ncol=1)
+```
+
+#### Find differentially expressed genes across phases.
+
+```{r,fig.width=5, fig.asp=.8, echo=F}
+Idents(counts)<-"Phase"
+matrix<- GetAssayData(object = counts, slot="counts")
+matrix_mod<-as.matrix(matrix)
+counts.avrgexpr<-data.frame(AverageExpression(object = counts,assays = 'RNA'))
+counts.avrgexpr$sum<-rowSums(counts.avrgexpr)
+
+counts.avrgexpr<-counts.avrgexpr[rowSums(counts.avrgexpr[, c(1:3)] > 0.05, na.rm=T) > 0 , ] 
+goi<-rownames(counts.avrgexpr)
+
+selected.group<-unique(gtf$gene_name[grepl("protein_coding|miRNA|snoRNA|lincRNA|scaRNA|snRNA|Mt_tRNA",gtf$gene_biotype)])
+###Remove pseudogenes and 'usual suspects' that are artifacts of the gtf file
+### you can also keep it, but be cautious about the result interpretation
+selected.group<-selected.group[!grepl("^RP11-|^CTD|^RP1|^RP5-|^RP4-|^AC|^AL1|^AL0|^AL6|AL3|^AL5|^FP2|^LA1|^CTB|^CH|^RN7SK|XIST|hsa-|MIR6724|^MT-", selected.group)]
+goi<-goi[goi %in% selected.group]
+
+matrix_mod<-matrix_mod[rownames(matrix_mod) %in%goi,]
+
+library(dplyr)
+nonecode<-unique(gtf$gene_name[grepl("miRNA|snoRNA|lincRNA|scaRNA|snRNA|Mt_tRNA",gtf$gene_biotype)])
+nonecode<-nonecode[nonecode %in% goi]
+
+
+counts.markers <- FindAllMarkers(object = counts, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+```{r}
+top250 <-counts.markers %>% group_by(cluster) %>% top_n(n = 250, wt = avg_logFC)
+#use both top top cell cycle marker genes + all non-coding 
+genes<-c(top250$gene, nonecode)
+
+```
+
+```{r}
+### For simplicity, we will use DESeq2 to vst normalize our count matrix, log transform it and feed it to DEGreport
+### it is also to do the same using a count table and standard formulas, takes a few extra lines of code
+library(DESeq2)
+library(DEGreport)
+library("ggplot2")
+
+meta<-counts@meta.data
+dds <- DESeqDataSetFromMatrix(countData = matrix_mod,
+                                 colData = meta,
+                                 design = ~ celltype) 
+
+dds <- estimateSizeFactors(dds)
+
+# Obtain rlog values for those significant genes
+matrix.rlog <- vst(dds)
+matrix.rlog.df<-assay(matrix.rlog)
+```
+
+
+```{r}
+matrix.rlog.sub<-matrix.rlog.df[rownames(matrix.rlog.df)%in%genes,]
+
+# Use the `degPatterns` function from the 'DEGreport' package to show gene clusters across sample groups
+clusters <- degPatterns(matrix.rlog.sub, metadata = meta, time = "Phase", col="celltype", plot=F,consensusCluster = F, reduce=T)
+
+degPlotCluster(clusters$normalized, "Phase", "celltype")+ 
+  theme(panel.background = element_blank(), 
+        panel.grid.major.y = element_line( color="grey", size = 0.25),
+        panel.grid.major.x = element_blank()) +
+  scale_x_discrete(limits=c('G1','S','G2M'))
+
+cluster.genes<-clusters$df[order(clusters$df$cluster),]
+cluster.genes$biotype<-gtf$gene_biotype[match(gsub("\\.","-",cluster.genes$genes),gtf$gene_name)]
+head(cluster.genes)
+```
+

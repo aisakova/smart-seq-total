@@ -1,0 +1,599 @@
+---
+title: "Part4. Analysis of mouse Smart-seq-total data"
+author: "Alina Isakova"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  
+---
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("Scripts/")) 
+```
+
+```{r}
+library(reticulate)
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(cowplot)
+library(openxlsx)
+library(ggplot2)
+library(edgeR)
+library(wesanderson)
+library(RColorBrewer)
+library(colorspace)
+#extrafont::loadfonts()
+```
+
+```{r}
+mycols<-c("#F39B7F","#E64B35", "#DC0000","#4DBBD5","steelblue2", "#3C5488","mediumturquoise","mediumaquamarine","forestgreen","#8491B4" )
+```
+
+```{r}
+counts<-read.delim(file = "counts.mouse.tsv",sep="\t", header= TRUE, row.names=1)
+#counts.sorted<-counts.sorted[!grepl("Hist", rownames(counts.sorted)),!grepl("plate10", colnames(counts.sorted))]
+```
+
+```{r}
+gtf<-read.delim(file = "GRCm38.id.name.biotype.tsv", sep='\t',  header=T)
+gtf<-gtf[match(rownames(counts.sorted),gtf$gene_name), ]
+```
+
+
+###Prep count matrix and metadata
+```{r}
+plate<-gsub('^(.*?_.*?_.*?)_.*', "\\1",  colnames(counts))
+
+plate.md<-cbind(colnames(counts),plate)
+plate.md<-data.frame(plate.md)
+rownames(plate.md)<-unique(plate.md$V1)
+
+celltype<-ifelse(grepl("d0",plate), "d0",
+              ifelse(grepl("d4",plate), 'd4', 
+                     ifelse(grepl("d8",plate), 'd8',
+                            'd12')))
+
+celltype.md<-cbind(colnames(counts),celltype)
+celltype.md<-data.frame(celltype.md)
+rownames(celltype.md)<-celltype.md$V1
+counts<-as.matrix(counts)
+```
+
+##Create Seurat object
+```{r}
+counts <- Matrix(counts, sparse = T)
+counts <- CreateSeuratObject(counts, project = "Mouse_sncRNA", min.cells = 3, min.features = 300)
+
+counts <- PercentageFeatureSet(object = counts, pattern = "^mt-", col.name = "percent.mt")
+counts <- PercentageFeatureSet(object = counts, pattern = "^Hist", col.name = "percent.hist")
+
+counts <- subset(counts, subset = nCount_RNA < 3e+06  & nFeature_RNA > 2000)
+
+#Add metadata
+counts <- AddMetaData(counts, 
+                      metadata = plate.md)
+counts <- AddMetaData(counts, 
+                      metadata = celltype.md)
+
+```
+# Visualize QC metrics as a violin plot
+```{r}
+VlnPlot(object = counts, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.hist"), ncol = 4)
+```
+
+```{r, fig.width=10, fig.asp=0.5}
+counts<-SCTransform(counts, verbose = FALSE, variable.features.n = 2000)
+counts<-RunPCA(counts, verbose = FALSE) 
+counts<-RunUMAP(counts, dims = 1:14, verbose = FALSE, umap.method='umap-learn', metric='correlation')
+counts <- RunTSNE(object = counts, dims = 1:15, verbose = FALSE)
+counts <- FindNeighbors(counts, dims = 1:15, verbose = FALSE,reduction.type = "umap")
+counts<-FindClusters(counts,resolution = 1.2, verbose = T)
+```
+
+
+### Part 1: Visualizing in reduced space (UMAP, tSNE, DM)
+
+```{r,fig.width=6, fig.asp=0.6}
+mylevels<-c('d0','d4','d8','d12')
+counts@meta.data$celltype<-factor(x=counts@meta.data$celltype, levels=mylevels)
+```
+
+```{r,fig.width=6, fig.asp=0.6}
+mycols3<-c("#3C5488","#4DBBD5","#E64B35","#F39B7F",'mediumorchid1',"#DC0000","steelblue2", "aquamarine3","mediumturquoise","forestgreen")
+DimPlot(object = counts, reduction = "umap",  group.by = "celltype", pt.size = 1) + ggtitle("UMAP by day") + theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_manual(values=mycols3[c(1,2,8,3)])
+```
+
+```{r,fig.width=6, fig.asp=0.6}
+DimPlot(object = counts, reduction = "umap",  group.by = "seurat_clusters",pt.size = 1) + ggtitle("UMAP by Seurat cluster") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r, fig.width=12, fig.asp=1.2}
+FeaturePlot(counts, reduction = "umap",features = c("Nanog", "Sox2", "Afp", "S100A4", "Tubb1", "Otx2", "Pax2", "Pax6", "Nes", "Nog", "Gata4", "Sox7","Sox17", "Tgfb1", "Gata6", "Mir370", "Mc1r", "Cycs", "Rbis", "Hist1h2al", "Col3a1", "Top2a", "Grik1", "Nras", "Elob"), pt.size = .5, ncol = 4)
+```
+
+
+```{r,fig.width=8, fig.asp=0.6}
+DimPlot(object = counts, reduction = "umap",group.by = "plate", pt.size = 1) + ggtitle("UMAP by plate") + theme(plot.title = element_text(hjust = 0.5))
+```
+##score cell cycle
+```{r}
+cc.genes<-read.delim(file = "mouse_regev_lab_cell_cycle_genes.txt", sep="\t", header= F, stringsAsFactors = F)
+s.genes<-cc.genes[1:43,]
+g2m.genes<-cc.genes[44:97,]
+```
+
+
+```{r}
+counts <- CellCycleScoring(counts, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+# view cell cycle scores and phase assignments
+head(counts[[]])
+# Visualize the distribution of cell cycle markers across
+RidgePlot(counts, features = c("Pcna", "Top2a", "Mcm6", "Mki67"), ncol = 2)
+```
+```{r,fig.width=8, fig.asp=.6}
+mylevels<-c('G1','S','G2M')
+counts@meta.data$Phase<-factor(x=counts@meta.data$Phase, levels=mylevels)
+
+DimPlot(object = counts, reduction = "umap",  group.by = "Phase", pt.size = 1) + ggtitle("UMAP by cc phase") + theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_manual(values=c("#999999",  "#56B4E9","#E69F00"))
+```
+
+
+
+```{r, fig.width=6, fig.asp=.6}
+library(viridis)
+plasma <- viridis(256, direction = 1, option = "D")
+plot<-FeaturePlot(counts, reduction = "umap", features = c("Nanog"), pt.size = 1, cols = plasma)
+plot
+```
+
+```{r, fig.width=12, fig.asp=1}
+FeaturePlot(counts, reduction = "umap", features = c("Nanog", "Sox2","Otx2", "Sox4", "Afp","Bmp7","T","Srf", "S100a4", "Tubb1", "Pax2", "Pax6", "Nes","Nog", "Krt18","Sox17", "Gata6","Gata4","Fgf5", "Sox7","Tubb3","Myc", "Bmp2", "Mir370", "Mir666","Mc1r", "Flk1", "Desmin", "Acta2", "Fbn2"), pt.size = 1, ncol = 4, sort.cell=T)
+```
+
+
+```{r}
+counts@meta.data$celltype<-factor(counts@meta.data$celltype, levels=c("d0",'d4', 'd8', 'd12'))
+VlnPlot(object = counts, group.by = "celltype", features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.hist"), ncol = 4, pt.size=0.5)+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+
+```{r}
+VlnPlot(object = counts, group.by = "seurat_clusters", features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.hist"), ncol = 4, pt.size=0.5)+
+  theme_linedraw()+theme(panel.background = element_blank(),panel.grid.major= element_blank(), panel.grid.minor = element_blank()) 
+```
+
+```{r,fig.width=8, fig.asp=1.5}
+Idents(counts)<-'seurat_clusters'
+counts.markers <- FindAllMarkers(object = counts, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+```{r,fig.width=8, fig.asp=1.5}
+top20 <-counts.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC) ##select and plot top20 markers based on logFC
+DoHeatmap(object = counts, features =as.character(top20$gene)) + NoLegend()
+
+top20 <-counts.markers %>% group_by(cluster) %>% top_n(n = 20, wt = -p_val_adj) ##select and plot top20 markers based on adjusted p-value
+DoHeatmap(object = counts, features =as.character(top20$gene)) + NoLegend()
+```
+```{r, fig.width=12, fig.asp=1.4}
+FeaturePlot(counts, features = c("Nanog" ,"Pou5f1","T",
+                                 "Olfr959", "Olfr129", "Onecut1", #sensory neuron precursors
+                                 "Etv2", "Kdr", #haemato-endothelial
+                                 "Cdh5", "Tie1", #endothelium
+                                 "Tbx4", "Hoxa11", "Ass1", "Bmp7",
+                                 "Mt1", "Utf1", "Ephx2", "Pou5f1", #extra ambryonic ectoderm
+                                 "Col4a1", "Epcam", "Sox17", #endoderm
+                                 "Hand2", "Gata6", #heart
+                                 "Meox2", "Pax3", #somite
+                                 "Hes7", "Tbx6", #mesoderm
+                                 "Wnt3a", "Fgf17", "Fgf8", "Nkx1-2", 
+                                 "Pax6","Sox1", "Hes3", "Sox2"
+                                 ), pt.size = 0.8, ncol = 4, sort.cell=T)
+```
+
+
+```{r}
+clusters.main.lineage <- counts@meta.data$seurat_clusters
+clusters.main.lineage<-gsub("^2$|^5$|^7$|^12$|^1$", "Primed.mESC",clusters.main.lineage)
+clusters.main.lineage<-gsub("^13$|^6$|^8$", "Ectoderm",clusters.main.lineage)
+clusters.main.lineage<-gsub("^3$", "pre-Ectoderm",clusters.main.lineage)
+clusters.main.lineage<-gsub("^10$", "Endoderm",clusters.main.lineage)  
+clusters.main.lineage<-gsub("^9$", "Ectomesoderm",clusters.main.lineage)  
+clusters.main.lineage<-gsub("^0$|^11$|^4$", "Mesoderm",clusters.main.lineage) 
+
+clusters.main.lineage.md<-cbind(colnames(counts),clusters.main.lineage)
+clusters.main.lineage.md<-data.frame(clusters.main.lineage.md)
+rownames(clusters.main.lineage.md)<-clusters.main.lineage.md$V1
+
+counts <- AddMetaData(counts, 
+                      metadata = clusters.main.lineage.md)
+```
+
+
+
+```{r, fig.width=12, fig.asp=1}
+library(colorspace)
+c.cols<-colorRampPalette(c("gray85", "gray85",sequential_hcl(20,"Blue-Yellow")[9:2]))(10)
+FeaturePlot(counts, features = c("Mir370" ,"Mir298","Mir387",
+                                 "Mir703", "Mir2137", "Mir351","Mir322",
+                                 "Mir666", 
+                                 "Mir412", "Mir320", #
+                                 "Mir351","Mir296",
+                                 "Mir92-2", "Mir19b-2",
+                                 "Mir130a",
+                                 "Mir5136","Mir302d",
+                                 "Mir2137", "Mir6240", "Mir382"
+                                 ), pt.size = 0.8, ncol = 4, sort.cell=T, cols = c.cols)+ NoLegend()
+```
+
+```{r,fig.width=6, fig.asp=0.6}
+library('unikn')
+library(jcolors)
+mylevels<-c("pre-Ectoderm","Primed.mESC","Ectoderm","Endoderm","Ectomesoderm","Mesoderm") 
+Idents(counts)<-'clusters.main.lineage'
+Idents(counts) <- factor(Idents(counts), levels= mylevels)
+
+mycols2<-c("#3C5488","steelblue2","#4DBBD5","aquamarine3","#F39B7F","#E64B35")
+mycols<-jcolors_contin(palette = "rainbow", reverse=T)(6)
+
+DimPlot(object = counts, reduction = "umap", pt.size = 1) + ggtitle("UMAP by cluster") + theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_manual(values = mycols) 
+
+```
+
+###Infer trajectory, compute pseudotime
+```{r}
+library(dyno)
+library(tidyverse)
+dyno.expression<-GetAssayData(object = counts, slot="data")
+dyno.expression<-Matrix::t(dyno.expression)
+
+dyno.counts<- GetAssayData(object = counts, slot="counts")
+dyno.counts<- Matrix::t(dyno.counts)
+
+dyno.anno<-data.frame(lapply(counts@meta.data, as.character), stringsAsFactors=FALSE) 
+
+dyno.scluster<-dyno.anno[,12]
+names(dyno.scluster)<-dyno.anno$V1
+
+dyno.day<-dyno.anno[,8]
+names(dyno.day)<-dyno.anno$V1
+
+dyno.lineage<-dyno.anno[,17]
+names(dyno.lineage)<-dyno.anno$V1
+
+
+dataset <- wrap_expression(
+  counts = dyno.counts,
+  expression = dyno.expression
+)
+
+dataset <- add_prior_information(
+  dataset,
+  start_id =  "mESC_d0_p2_A7_S7"  
+)
+
+dataset <- add_grouping(
+     dataset,
+     dyno.scluster
+   )
+
+dataset <- add_grouping(
+     dataset,
+     dyno.lineage
+   )
+
+dataset <- add_grouping(
+     dataset,
+     dyno.day
+   )
+```
+
+```{r}
+
+model <- infer_trajectory(dataset, ti_paga_tree(filter_features = TRUE, n_neighbors = 13L,
+                                                n_comps = 30L, n_dcs = 5L, resolution = 2L,
+                                                embedding_type = "umap"))
+
+
+```
+
+
+```{r}
+model <- model %>% add_root(root_milestone_id = "1")
+
+patchwork::wrap_plots(
+  plot_dimred(model) + ggtitle("Cell ordering"),
+  plot_dimred(model, grouping = group_onto_nearest_milestones(model)) + ggtitle("Cell grouping"),
+  plot_dimred(model, feature_oi = "Nanog", expression_source = dataset) + ggtitle("Feature expression"),
+  plot_dimred(model, "pseudotime", pseudotime = calculate_pseudotime(model)) + ggtitle("Pseudotime"),
+  plot_dimred(model,  grouping = dataset$grouping)
+)
+
+```
+
+
+```{r}
+patchwork::wrap_plots(
+  plot_dimred(model) + ggtitle("Cell ordering"),
+  plot_dimred(model, feature_oi = "Tubb3", expression_source = dataset) + ggtitle("Feature expression"),  ##ectoderm
+  plot_dimred(model, feature_oi = "Acta2", expression_source = dataset) + ggtitle("Feature expression"),  ##mesoderm
+  plot_dimred(model, feature_oi = "Afp", expression_source = dataset) + ggtitle("Feature expression"),##endoderm
+  plot_dimred(model, feature_oi = "Tdgf1", expression_source = dataset) + ggtitle("Feature expression"),
+  plot_dimred(model, feature_oi = "Col3a1", expression_source = dataset) + ggtitle("Feature expression"),
+  plot_dimred(model, feature_oi = "Dlk1", expression_source = dataset) + ggtitle("Feature expression"),
+  plot_dimred(model, feature_oi = "Nanog", expression_source = dataset) + ggtitle("Feature expression"),
+  plot_dimred(model, feature_oi = "Vcam1", expression_source = dataset) + ggtitle("Feature expression"),
+  plot_dimred(model, feature_oi = "Grik1", expression_source = dataset) + ggtitle("Feature expression") ,
+  plot_dimred(model, feature_oi = "Nras", expression_source = dataset) + ggtitle("Feature expression"),
+  plot_dimred(model, "pseudotime", pseudotime = calculate_pseudotime(model)) + ggtitle("Pseudotime"),
+  plot_dimred(model,  grouping = dataset$grouping)
+)
+```
+
+
+
+```{r}
+plot_dendro(model, "pseudotime")
+```
+
+
+
+```{r}
+dataset <- add_grouping(
+     dataset,
+     dyno.day
+   )
+
+model <- model %>% add_grouping(grouping = dataset$grouping)
+mycols4<-c("#3C5488B2","#4DBBD5B2","#E64B35B2","#F39B7F",'mediumorchid1',"#DC0000","steelblue2", "aquamarine3","mediumturquoise","forestgreen")
+
+model$grouping<-factor(model$grouping, levels=c("d0",'d4', 'd8', 'd12'))
+
+plot_dendro(model, "grouping") + scale_color_manual(values=mycols4[c(1,2,8,3)])
+```
+
+```{r}
+dataset <- add_grouping(
+     dataset,
+     dyno.lineage
+   )
+
+model <- model %>% add_grouping(grouping = dataset$grouping)
+
+model$grouping<-factor(model$grouping, levels=c("pre-Ectoderm","Primed.mESC","Ectoderm","Endoderm","Ectomesoderm","Mesoderm") )
+
+plot_dendro(model, "grouping") + scale_color_manual(values=mycols)
+```
+
+```{r}
+plot_dendro(model, feature_oi = "Afp",expression_source = dataset)
+plot_dendro(model, feature_oi = "Pax6",expression_source = dataset)
+plot_dendro(model, feature_oi = "Nanog",expression_source = dataset)
+plot_dendro(model, feature_oi = "Pou5f1",expression_source = dataset)
+
+```
+
+
+```{r}
+pseudotime = calculate_pseudotime(model)
+pseudotime.md<-cbind(colnames(counts),pseudotime)
+pseudotime.md<-data.frame(pseudotime.md)
+
+
+counts <- AddMetaData(counts, 
+                      metadata = pseudotime.md)
+```
+
+
+```{r, fig.width=6, fig.asp=.6}
+library(viridis)
+plasma <- viridis(899, direction = 1, option = "D")
+DimPlot(counts, reduction = "umap", group.by ='pseudotime', pt.size = 1, cols = plasma)+ NoLegend() 
+```
+
+```{r}
+#Save the Seurat object for further analysis in part 2 (optional)
+#saveRDS(counts,file="Mouse.count.Seurat.obj.rds")
+```
+
+
+```{r}
+dimred2<-Embeddings(object = counts, reduction = "umap")
+plot_dimred(model, dimred = dimred2)
+```
+
+
+
+#### Calculate DEG between each lineage and primed mESCs (Fig. 3e)
+```{r}
+
+nc.genes<-rownames(counts)
+
+
+Idents(counts)<-'clusters.main.lineage'
+#celltype.markers <- FindAllMarkers(object = counts, only.pos = F, min.pct = 0.25, logfc.threshold = 0.25)
+preectoderm.markers <- FindMarkers(object = counts,  ident.1='pre-Ectoderm' , ident.2='Primed.mESC',only.pos = F, min.pct = 0.1, logfc.threshold = 0.25, features=nc.genes)
+preectoderm.markers$lineage<-'pre-Ectoderm'
+preectoderm.markers$gene<-rownames(preectoderm.markers)
+
+
+ectoderm.markers <- FindMarkers(object = counts,  ident.1='Ectoderm' , ident.2='Primed.mESC', only.pos = F, min.pct = 0.1, logfc.threshold = 0.25, features=nc.genes)
+ectoderm.markers$lineage<-'Ectoderm'
+ectoderm.markers$gene<-rownames(ectoderm.markers)
+
+
+endoderm.markers <- FindMarkers(object = counts, ident.1='Endoderm' , ident.2='Primed.mESC', only.pos = F, min.pct = 0.1, logfc.threshold = 0.25,features=nc.genes)
+endoderm.markers$lineage<-'Endoderm'
+endoderm.markers$gene<-rownames(endoderm.markers)
+
+
+mesoderm.markers <- FindMarkers(object = counts,  ident.1='Mesoderm' , ident.2='Primed.mESC',only.pos = F, min.pct = 0.1, logfc.threshold = 0.25,features=nc.genes)
+mesoderm.markers$lineage<-'Mesoderm'
+mesoderm.markers$gene<-rownames(mesoderm.markers)
+
+
+ectomesoderm.markers <- FindMarkers(object = counts,  ident.1='Ectomesoderm' , ident.2='Primed.mESC',only.pos = F, min.pct = 0.1, logfc.threshold = 0.25,features=nc.genes)
+
+ectomesoderm.markers$lineage<-'Ectomesoderm'
+ectomesoderm.markers$gene<-rownames(ectomesoderm.markers)
+```
+
+```{r}
+# take top 7 marker genes per lineage
+n<-7
+#Suspect that these are artifacts : 'Mir5119|Mir6538|Mir5136'
+preectoderm.markers<-preectoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',preectoderm.markers$gene),]
+preectoderm.markers$name <- ifelse(preectoderm.markers$avg_logFC %in% head(sort(preectoderm.markers$avg_logFC, decreasing = FALSE),n),preectoderm.markers$gene,
+                                    ifelse(preectoderm.markers$avg_logFC %in% head(sort(preectoderm.markers$avg_logFC, decreasing = T),n),preectoderm.markers$gene, ''))
+
+
+endoderm.markers<-endoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',endoderm.markers$gene),]
+endoderm.markers$name <- ifelse(endoderm.markers$avg_logFC %in% head(sort(endoderm.markers$avg_logFC, decreasing = FALSE),n),endoderm.markers$gene,
+                                    ifelse(endoderm.markers$avg_logFC %in% head(sort(endoderm.markers$avg_logFC, decreasing = T),n),endoderm.markers$gene, ''))
+
+
+ectoderm.markers<-ectoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',ectoderm.markers$gene),]
+ectoderm.markers$name <- ifelse(ectoderm.markers$avg_logFC %in% head(sort(ectoderm.markers$avg_logFC, decreasing = FALSE),n),ectoderm.markers$gene,
+                                    ifelse(ectoderm.markers$avg_logFC %in% head(sort(ectoderm.markers$avg_logFC, decreasing = T),n),ectoderm.markers$gene, ''))
+
+
+mesoderm.markers<-mesoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',mesoderm.markers$gene),]
+mesoderm.markers$name <- ifelse(mesoderm.markers$avg_logFC %in% head(sort(mesoderm.markers$avg_logFC, decreasing = FALSE),n),mesoderm.markers$gene,
+                                    ifelse(mesoderm.markers$avg_logFC %in% head(sort(mesoderm.markers$avg_logFC, decreasing = T),n),mesoderm.markers$gene, ''))
+
+
+ectomesoderm.markers<-ectomesoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',ectomesoderm.markers$gene),]
+ectomesoderm.markers$name <- ifelse(ectomesoderm.markers$avg_logFC %in% head(sort(ectomesoderm.markers$avg_logFC, decreasing = FALSE),n),ectomesoderm.markers$gene,
+                                    ifelse(ectomesoderm.markers$avg_logFC %in% head(sort(ectomesoderm.markers$avg_logFC, decreasing = T),n),ectomesoderm.markers$gene, ''))
+```
+
+####markers for all RNA
+```{r}
+celltype.markers<-rbind(preectoderm.markers,ectoderm.markers,endoderm.markers,mesoderm.markers,ectomesoderm.markers)
+celltype.markers<-celltype.markers[!grepl('Mir5119|Mir6538|Mir5136',celltype.markers$gene),]
+
+celltype.markers$lineage<-factor(celltype.markers$lineage,levels=c('pre-Ectoderm', 'Ectoderm', 'Endoderm', 'Ectomesoderm', 'Mesoderm'))
+
+celltype.markers$biotype<-gtf[match(celltype.markers$name,gtf$gene_name), 3]
+celltype.markers$color<-ifelse(celltype.markers$biotype=='lncRNA', 'black',
+                           ifelse(celltype.markers$biotype=='miRNA', 'blue' ,
+                                  ifelse(celltype.markers$biotype=='snoRNA', 'forestgreen',
+                                         ifelse(celltype.markers$biotype=='snRNA', 'grey',
+                                                ifelse(celltype.markers$biotype=='Mt_tRNA', 'darkorchid3',
+                                                       ifelse(celltype.markers$biotype=='scaRNA', 'chocolate3',
+                                                              ifelse(celltype.markers$biotype=='protein_coding', 'slateblue3',
+                                                                     ifelse(grepl('pseudogene|TEC',celltype.markers$biotype), NA,
+                                                ''))))))))
+set.seed(1)
+pos <- position_jitter(width = .2, seed = 1)
+library(ggrepel)
+celltype.markers$sig <- ifelse(celltype.markers$p_val_adj < 0.05, "P-value < 0.05", "Not Significant")
+ggplot(celltype.markers, aes(x=lineage, y=avg_logFC)) + 
+  geom_point(position = pos ,aes(color=sig), size=1)+
+  scale_y_continuous()+
+  scale_color_manual(values = c( "black","red")) + 
+  theme_bw(base_size = 12) +  
+  theme(legend.position = "right") + 
+  geom_text_repel( position = pos ,aes(label = name), colour=celltype.markers$color, size = 3, label.padding=0.1)+
+  xlab("Lineage")+
+  ylab("Average logFC")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+
+####markers for nc RNA only
+```{r}
+nc.genes<-c(as.character(gtf[grepl('miRNA|snoRNA|scaRNA|tRNA|snRNA|misc_RNA|sRNA|lncRNA',gtf$gene_biotype),2]),   
+       rownames(counts)[grepl('Hist|tRNA',rownames(counts))])
+nc.genes<-nc.genes[!grepl('^Gm|^AF|Rik$|^AI|^BC|^AA',nc.genes)]
+nc.genes<-nc.genes[nc.genes %in% rownames(counts)]
+
+Idents(counts)<-'clusters.main.lineage'
+
+preectoderm.markers <- FindMarkers(object = counts,  ident.1='pre-Ectoderm' , ident.2='Primed.mESC',only.pos = F, min.pct = 0.1, logfc.threshold = 0.25, features=nc.genes)
+preectoderm.markers$lineage<-'pre-Ectoderm'
+preectoderm.markers$gene<-rownames(preectoderm.markers)
+
+
+ectoderm.markers <- FindMarkers(object = counts,  ident.1='Ectoderm' , ident.2='Primed.mESC', only.pos = F, min.pct = 0.1, logfc.threshold = 0.25, features=nc.genes)
+ectoderm.markers$lineage<-'Ectoderm'
+ectoderm.markers$gene<-rownames(ectoderm.markers)
+
+
+endoderm.markers <- FindMarkers(object = counts, ident.1='Endoderm' , ident.2='Primed.mESC', only.pos = F, min.pct = 0.1, logfc.threshold = 0.25,features=nc.genes)
+endoderm.markers$lineage<-'Endoderm'
+endoderm.markers$gene<-rownames(endoderm.markers)
+
+
+mesoderm.markers <- FindMarkers(object = counts,  ident.1='Mesoderm' , ident.2='Primed.mESC',only.pos = F, min.pct = 0.1, logfc.threshold = 0.25,features=nc.genes)
+mesoderm.markers$lineage<-'Mesoderm'
+mesoderm.markers$gene<-rownames(mesoderm.markers)
+
+
+ectomesoderm.markers <- FindMarkers(object = counts,  ident.1='Ectomesoderm' , ident.2='Primed.mESC',only.pos = F, min.pct = 0.1, logfc.threshold = 0.25,features=nc.genes)
+
+ectomesoderm.markers$lineage<-'Ectomesoderm'
+ectomesoderm.markers$gene<-rownames(ectomesoderm.markers)
+
+n<-7
+
+preectoderm.markers<-preectoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',preectoderm.markers$gene),]
+preectoderm.markers$name <- ifelse(preectoderm.markers$avg_logFC %in% head(sort(preectoderm.markers$avg_logFC, decreasing = FALSE),n),preectoderm.markers$gene,
+                                    ifelse(preectoderm.markers$avg_logFC %in% head(sort(preectoderm.markers$avg_logFC, decreasing = T),n),preectoderm.markers$gene, ''))
+
+
+endoderm.markers<-endoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',endoderm.markers$gene),]
+endoderm.markers$name <- ifelse(endoderm.markers$avg_logFC %in% head(sort(endoderm.markers$avg_logFC, decreasing = FALSE),n),endoderm.markers$gene,
+                                    ifelse(endoderm.markers$avg_logFC %in% head(sort(endoderm.markers$avg_logFC, decreasing = T),n),endoderm.markers$gene, ''))
+
+
+ectoderm.markers<-ectoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',ectoderm.markers$gene),]
+ectoderm.markers$name <- ifelse(ectoderm.markers$avg_logFC %in% head(sort(ectoderm.markers$avg_logFC, decreasing = FALSE),n),ectoderm.markers$gene,
+                                    ifelse(ectoderm.markers$avg_logFC %in% head(sort(ectoderm.markers$avg_logFC, decreasing = T),n),ectoderm.markers$gene, ''))
+
+
+mesoderm.markers<-mesoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',mesoderm.markers$gene),]
+mesoderm.markers$name <- ifelse(mesoderm.markers$avg_logFC %in% head(sort(mesoderm.markers$avg_logFC, decreasing = FALSE),n),mesoderm.markers$gene,
+                                    ifelse(mesoderm.markers$avg_logFC %in% head(sort(mesoderm.markers$avg_logFC, decreasing = T),n),mesoderm.markers$gene, ''))
+
+
+ectomesoderm.markers<-ectomesoderm.markers[!grepl('Mir5119|Mir6538|Mir5136',ectomesoderm.markers$gene),]
+ectomesoderm.markers$name <- ifelse(ectomesoderm.markers$avg_logFC %in% head(sort(ectomesoderm.markers$avg_logFC, decreasing = FALSE),n),ectomesoderm.markers$gene,
+                                    ifelse(ectomesoderm.markers$avg_logFC %in% head(sort(ectomesoderm.markers$avg_logFC, decreasing = T),n),ectomesoderm.markers$gene, ''))
+
+celltype.markers<-rbind(preectoderm.markers,ectoderm.markers,endoderm.markers,mesoderm.markers,ectomesoderm.markers)
+celltype.markers<-celltype.markers[!grepl('Mir5119|Mir6538|Mir5136',celltype.markers$gene),]
+
+celltype.markers$lineage<-factor(celltype.markers$lineage,levels=c('pre-Ectoderm', 'Ectoderm', 'Ectomesoderm', 'Mesoderm', 'Endoderm'))
+
+celltype.markers$biotype<-gtf[match(celltype.markers$name,gtf$gene_name), 3]
+celltype.markers$color<-ifelse(celltype.markers$biotype=='lncRNA', 'black',
+                           ifelse(celltype.markers$biotype=='miRNA', 'blue' ,
+                                  ifelse(celltype.markers$biotype=='snoRNA', 'forestgreen',
+                                         ifelse(celltype.markers$biotype=='snRNA', 'grey',
+                                                ifelse(celltype.markers$biotype=='Mt_tRNA', 'darkorchid3',
+                                                       ifelse(celltype.markers$biotype=='scaRNA', 'chocolate3',
+                                                              ifelse(celltype.markers$biotype=='protein_coding', 'slateblue3',
+                                                                     ifelse(grepl('pseudogene|TEC',celltype.markers$biotype), NA,
+                                                ''))))))))
+set.seed(1)
+pos <- position_jitter(width = .2, seed = 1)
+celltype.markers$sig <- ifelse(celltype.markers$p_val_adj < 0.05, "P-value < 0.05", "Not Significant")
+ggplot(celltype.markers, aes(x=lineage, y=avg_logFC)) + 
+  geom_point(position = pos ,aes(color=sig), size=1)+
+  scale_y_continuous()+
+  scale_color_manual(values = c( "black","red")) + 
+  theme_bw(base_size = 12) +  
+  theme(legend.position = "right") + 
+  geom_text_repel( position = pos ,aes(label = name), colour=celltype.markers$color, size = 2.5, label.padding=0.1)+
+  xlab("Lineage")+
+  ylab("Average logFC")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+
