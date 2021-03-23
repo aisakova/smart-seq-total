@@ -14,6 +14,8 @@ STAR (https://github.com/alexdobin/STAR)
 
 htseq (https://htseq.readthedocs.io/en/master/) 
 
+samtools (http://www.htslib.org) 
+
 featureCounts (http://subread.sourceforge.net) 
 
 UMI-tools (https://umi-tools.readthedocs.io/en/latest/QUICK_START.html)
