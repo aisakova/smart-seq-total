@@ -1,6 +1,9 @@
 # Smart-seq-total
 This repository hosts a Snakemake pipeline and R notebooks used to analyze Smart-seq-total v1 and v2 data.
 
+![github](https://user-images.githubusercontent.com/40051862/112074504-abfcda80-8b33-11eb-86d7-45215fd1291a.png)
+
+
 ## Prerequisites
 
 snakemake (https://snakemake.readthedocs.io/en/stable/)
