@@ -99,7 +99,8 @@ STEP 1: Extract UMIs from Read1 and append them to Read2 headers
     umi_tools extract --stdin {input.R1} --bc-pattern=NNNNNNNNNNNNNNNN \
                       --log {output.log}  --read2-in {input.R2} --read2-out {output}
 
-
+  ** R1 is usually a mix of: 1) reads containing a UMI followed by a stretch of Ts (~70%) and 2) gene body reads corresponding to tagmented molecules (~30%). For precise molecule count, one should filter R1 files (and R2 respectively) and keep only UMI-containing pairs (based on the presence of TTTTTTT at the end of each R1) (type 1 read above). Otherwise, assuming that each mRNA molecule gets no more than two cuts during tagmentation, the gene body part of R1 (type 2 read) can be also treated as a UMI (since two mRNA molecules are unlikely to be cut at the exact same location).
+  
 STEP 2: Trim A-tails (>=10bp) from the 3'prime of the Read2
 
      cutadapt -j 4 -u 6 -a AAAAAAAAAA -m 18 -o {output.trimmed.R2} {input.R2}
