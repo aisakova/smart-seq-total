@@ -1,0 +1,241 @@
+from pprint import pprint
+import os
+import pandas as pd
+from glob import glob
+from collections import defaultdict
+
+shell.prefix("set +euo pipefail;")
+
+
+READSDIR=  "/fastq/"
+
+
+REFDIR =        "/Human.ref.genome/"
+STARFASTAREF =  REFDIR+"Homo_sapiens.GRCh38.82.dna.primary_assembly.ERCC.fa"
+STARREFDIR =    REFDIR+"star-genome2/"
+GTFFILE =       REFDIR+"Homo_sapiens.GRCh38.82.ERCC.tRNA.gtf"
+CHRNAME =       STARREFDIR + "chrName.txt"
+MIRBASE =       REFDIR + "hsa.gtf"
+
+
+STAR =          "STAR"
+CUTADAPT =       "cutadapt"
+UMI =            "umi_tools"
+
+WC = glob_wildcards(READSDIR+"{fullname}_R2_001.fastq.gz")
+SAMPLES = set(WC.fullname) # unique sample names
+##pprint(WC)
+
+
+COUNT_TABLE = 'counts.table.tsv'
+COUNTS =        ['counts/' + f + '.counts.tsv.gz' for f in SAMPLES]
+MAPPED =        ['mapped/' + f + '.Aligned.sortedByCoord.out.bam' for f in SAMPLES]
+INDEXED =        ['mapped/' + f + '.Aligned.sortedByCoord.out.bam.bai' for f in SAMPLES]
+COVERAGE =      'output.geneBodyCoverage.pdf'
+
+
+rule all:
+     input: COUNTS
+     params: name="all", partition="normal", mem="1024"
+     threads: 1
+
+
+
+##### STEP 1: extract UMIs  ##########
+rule extract_umi:
+     input:
+       R1=READSDIR+"{sample}_R1_001.fastq.gz",
+       R2=READSDIR+"{sample}_R2_001.fastq.gz"
+     output: "demuxed/{sample}.demuxed.fastq.gz", log="demuxed/UMI.{sample}.log"
+     threads: 4
+     params: name="UMI.{sample}", mem="51200"
+     shell:
+       """
+       {UMI} extract --stdin {input.R1} --bc-pattern=NNNNNNNNNNNNNNNN --log {output.log}  --read2-in {input.R2} --read2-out {output}
+       """
+
+
+##### STEP 2: TRIM ADAPTERS FROM READ2 ##########
+rule trim_polyA:
+     input:
+       R2="demuxed/{sample}.demuxed.fastq.gz"
+     output: "trimmed/{sample}.trimmed.fastq.gz"
+     threads: 4
+     params: name="TRIM.{sample}", mem="51200"
+     shell:
+       """
+       {CUTADAPT} -j 4 -u 6 -a AAAAAAAAAA -m 18 -o {output} {input.R2}
+       """
+
+
+##### STAR INDEX #####
+
+rule starindex:
+    input:
+        ref = STARFASTAREF, starref = STARREFDIR, gtf = GTFFILE
+    output:
+        CHRNAME
+    threads: 8
+    params: name="index.STAR", partition="normal", mem="124000"
+    shell:
+        """
+        {STAR} --runThreadN 8 \
+               --runMode genomeGenerate \
+               --genomeDir {input.starref} \
+               --genomeFastaFiles {input.ref}
+        """
+
+
+##### STEP 3: MAP READ2  ##########
+
+rule map_star:
+     input: CHRNAME,
+       R2="trimmed/{sample}.trimmed.fastq.gz",
+       starref=STARREFDIR,
+       gtf=GTFFILE
+     output: "mapped/{sample}.Aligned.sortedByCoord.out.bam", "mapped/{sample}.Aligned.out.bam"
+     threads: 4
+     params: name="STAR.{sample}", mem="32000", dir="mapped/{sample}"
+     shell:
+       """
+       {STAR}  --genomeDir {input.starref} \
+               --outFileNamePrefix {params.dir}. \
+               --readFilesIn {input.R2}\
+               --runThreadN 4 \
+               --readFilesCommand zcat \
+               --outReadsUnmapped Fastx \
+               --outSAMtype BAM Unsorted SortedByCoordinate \
+               --outSAMattributes All \
+               --outFilterMismatchNoverLmax 0.05 \
+               --outFilterMatchNmin 16 \
+               --outFilterScoreMinOverLread 0 \
+               --outFilterMatchNminOverLread 0 \
+               --outMultimapperOrder Random
+       """
+       
+
+
+##### STEP 4: Assign features #####
+rule feature_count:
+    input: bam="mapped/{sample}.Aligned.sortedByCoord.out.bam", gtf=GTFFILE    
+    output: gene="counts/{sample}.gene_assigned", fcbam="counts/{sample}.Aligned.sortedByCoord.out.bam.featureCounts.bam"
+    threads: 4
+    params: name="{sample}.featurecounts", mem="16000"
+    shell:
+       """
+            featureCounts -a {input.gtf} \
+                          -o {output.gene} \
+                          -R BAM {input.bam} \
+                          -T 4            
+       """
+
+
+###### STEP 4: sort and index bam #####
+rule sort_bam:
+    input: fcbam="counts/{sample}.Aligned.sortedByCoord.out.bam.featureCounts.bam" 
+    output: bam="counts/{sample}.assigned_sorted.bam"
+    threads: 4
+    params: name="{sample}.index",  mem="16000"
+    shell:
+       """
+            samtools sort {input.fcbam} -o {output.bam}
+            samtools index {output.bam}
+       """
+
+
+
+
+###### STEP 5: UMI count #####
+rule umi_count:
+    input: bam="counts/{sample}.assigned_sorted.bam"
+    output: counts="counts/{sample}.counts.tsv.gz"
+    threads: 4
+    params: name="{sample}.umi",  mem="16000"
+    shell:
+       """
+            umi_tools count --per-gene \
+                            --gene-tag=XT \
+                            --assigned-status-tag=XS -I {input.bam} -S {output.counts}
+       """
+
+
+
+
+###### STEP EXTRA: index BAM #####
+rule bam_index:
+    input: bam="mapped/{sample}.Aligned.sortedByCoord.out.bam"
+    output: bami="mapped/{sample}.Aligned.sortedByCoord.out.bam.bai"
+    threads: 4
+    params: name="{sample}.bai",  mem="16000"
+    shell:
+       """
+            samtools index {input.bam} {output.bami}
+       """
+
+
+
+
+
+###### STEP COVERAGE: compute gene COVERAGE #####
+rule coverage:
+    input: bed="../refs/hg38.HouseKeepingGenes.nochr.bed", files="mapped/"
+    output: "output.geneBodyCoverage.pdf"
+    threads: 4
+    params: mem="16000", name="coverage", prefix="output"
+    shell:
+       """
+            geneBody_coverage.py -r {input.bed} -i {input.files} -o {params.prefix}
+       """
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##### HTSEQ ########
+
+rule htseq:
+    input: sample="mapped/{sample}.Aligned.sortedByCoord.out.bam", gtf=GTFFILE
+    output: id="counts/{sample}.htseq.tsv"
+    threads: 1
+    params: name="htseq_{sample}", partition="normal", mem="4000"
+    shell:
+      """
+        samtools view -h {input.sample} | htseq-count \
+            --mode intersection-strict \
+            --stranded no \
+            --type exon \
+            --additional-attr gene_name \
+            --idattr gene_id - {input.gtf} > {output.id}
+      """
+
+##### featureCounts #####
+
+rule featurecount:
+    input: bam="mapped/{sample}.Aligned.sortedByCoord.out.bam", gtf=GTFFILE
+    output: id="counts/{sample}.fc.tsv"
+    threads: 4
+    params: name="fc.{sample}", mem="16000"
+    shell:  
+       """  
+            featureCounts  -M --primary -a {input.gtf} -o {output} -T {threads} {input.bam}
+       """
+
+

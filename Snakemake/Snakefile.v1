@@ -1,0 +1,147 @@
+from pprint import pprint
+import os
+import pandas as pd
+from glob import glob
+from collections import defaultdict
+
+shell.prefix("set +euo pipefail;")
+
+
+READSDIR=  "/fastq/"
+
+
+REFDIR =        "/Human.genome.ref/"
+STARFASTAREF =  REFDIR+"Homo_sapiens.GRCh38.82.dna.primary_assembly.ERCC.fa"
+STARREFDIR =    REFDIR+"star-genome2/"
+GTFFILE =       REFDIR+"Homo_sapiens.GRCh38.82.ERCC.45SRNA.gtf"
+CHRNAME =       STARREFDIR + "chrName.txt"
+MIRBASE =       REFDIR + "hsa.nochr.gtf"
+
+STAR =          "STAR"
+CUTADAPT =       "cutadapt"
+UMI =            "umi_tools"
+
+WC = glob_wildcards("{fullname}_R1_001.fastq.gz")
+SAMPLES = set(WC.fullname) # unique sample names
+pprint(WC)
+
+
+COUNT_TABLE = 'counts.table.tsv'
+COUNTS =        ['counts/' + f + '.fc.tsv' for f in SAMPLES]
+MAPPED =        ['/*/mapped/' + f + '.Aligned.sortedByCoord.out.bam' for f in SAMPLES]
+MAPPEDINDEXED = ['mapped/' + f + '.Aligned.sortedByCoord.out.bam.bai' for f in SAMPLES]
+HTSEQCOUNTS =   ['counts/' + f + '.htseq.tsv' for f in SAMPLES]
+
+rule all:
+     input: HTSEQCOUNTS
+     params: name="all", partition="normal", mem="1024"
+     threads: 1
+
+
+
+
+##### STEP 1: TRIM ADAPTERS FROM READ1 ##########
+rule trim:
+     input:
+        R1=READSDIR+"{sample}_R1_001.fastq.gz"
+     output: "trimmed/{sample}.trimmed.fastq.gz"
+     threads: 4
+     params: name="TRIM.{sample}", mem="25600"
+     shell:
+       """
+       {CUTADAPT} -j 4 -a AAAAAAAAAA -m 18 -o {output} {input.R1}
+       """
+
+
+##### STAR INDEX #####
+
+rule starindex:
+    input:
+        ref = STARFASTAREF, starref = STARREFDIR, gtf = GTFFILE
+    output:
+        CHRNAME
+    threads: 8
+    params: name="index.STAR", partition="normal", mem="124000"
+    shell:
+        """
+        {STAR} --runThreadN 8 \
+               --runMode genomeGenerate \
+               --genomeDir {input.starref} \
+               --genomeFastaFiles {input.ref}
+        """
+
+
+##### STEP 2: MAP READ1  ##########
+
+rule map:
+     input: CHRNAME,
+       R1=READSDIR+"{sample}_R1_001.fastq.gz",
+       starref=STARREFDIR,
+       gtf=GTFFILE
+     output: "mapped/{sample}.Aligned.sortedByCoord.out.bam", "mapped/{sample}.Aligned.out.bam"
+     threads: 4
+     params: name="STAR.{sample}", mem="32000", dir="mapped/{sample}"
+     shell:
+       """
+       {STAR}  --genomeDir {input.starref} \
+               --outFileNamePrefix {params.dir}. \
+               --readFilesIn {input.R1}\
+               --runThreadN 4 \
+               --readFilesCommand zcat \
+               --outReadsUnmapped Fastx \
+               --outSAMtype BAM Unsorted SortedByCoordinate \
+               --outSAMattributes All \
+               --outFilterMismatchNoverLmax 0.05 \
+               --outFilterMatchNmin 16 \
+               --outFilterScoreMinOverLread 0 \
+               --outFilterMatchNminOverLread 0 \
+               --outMultimapperOrder Random
+       """
+       
+
+
+##### STEP 3: COUNT #####
+rule feature_count:
+    input: bam="mapped/{sample}.Aligned.sortedByCoord.out.bam", gtf=GTFFILE    
+    output: gene="counts/{sample}.fc.tsv"
+    threads: 4
+    params: name="{sample}.featurecounts", mem="16000"
+    shell:
+       """
+            featureCounts -a {input.gtf} \
+                          -M \
+                          -o {output.gene} \
+                          -T 4 \
+                          {input.bam}            
+       """
+
+
+
+##### HTSEQ ########
+
+rule htseq:
+    input: sample="{sample}.Aligned.sortedByCoord.out.bam", gtf=GTFFILE
+    output: id="counts/{sample}.htseq.tsv"
+    threads: 1
+    params: name="htseq", partition="normal", mem="4000"
+    shell:
+      """
+        samtools view -h {input.sample} | htseq-count \
+            --stranded no \
+            --additional-attr gene_name \
+            --idattr Name - {input.gtf} > {output.id}
+      """
+
+
+
+###### STEP EXTRA: index BAM #####
+rule bam_index:
+    input: bam="mapped/{sample}.Aligned.sortedByCoord.out.bam"
+    output: bami="mapped/{sample}.Aligned.sortedByCoord.out.bam.bai"
+    threads: 4
+    params: name="{sample}.bai",  mem="16000"
+    shell:
+       """
+            samtools index {input.bam} {output.bami}
+       """
+
