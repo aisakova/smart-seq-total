@@ -145,5 +145,7 @@ STEP 5: Count features (genes)
 ## Reference
 
 Single cell profiling of total RNA using Smart-seq-total
+
 Alina Isakova, Norma Neff, Stephen R. Quake
+
 doi: https://doi.org/10.1101/2020.06.02.131060
